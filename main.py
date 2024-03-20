@@ -92,7 +92,7 @@ def main(request):
             userid = event.source.user_id
             if isinstance(event.message, LocationMessage):                
                 if userid in status:
-                    # 位置情報を取得した場合、GooglePlaceAPIで周辺検索7
+                    # 位置情報を取得した場合、GooglePlaceAPIで周辺検索
                     search_word = status[userid]
                     if search_word.endswith("科"):
                         search_word = '病院　' + search_word
