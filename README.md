@@ -9,11 +9,14 @@
 位置情報の送信を促してくるので、言われるままに位置情報を教えると症状に合わせた診療科でGoogleMapを検索した結果を表示します。
 
 以下環境・APIを使って動作します。
-* Google Cloud Functions（ランタイム：Python 3.8）
+* Google Cloud Functions（ランタイム：Python 3.9）
 * Google Place API
 * LINE Messaging API
+* Google Generative AI（Gemini）API
 
 # 注意
-選択肢や診療科は医学的見地に基づいて設定したものではなく、製作者のイメージによるところが大きいです。
+応答内容はGoogle Generative AI（Gemini）によるものであり、専門家のアドバイスに代わるものではありません。
 
-誤りを含む可能性がありますのでご留意の上でご使用ください。
+詳細はGeminiAPI利用規約（https://ai.google.dev/terms）等をご参照ください。
+
+応答内容には誤りを含む可能性がありますので、ご留意の上でご使用ください。
