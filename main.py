@@ -1,10 +1,13 @@
 import os
-import base64, hashlib, hmac, urllib
+import base64, hashlib, hmac
 
 from flask import abort, jsonify
-
 import googlemaps
 import requests
+import google.generativeai as genai
+import google.ai.generativelanguage as glm
+
+import datetime
 
 from linebot import (
     LineBotApi, WebhookParser
@@ -13,60 +16,20 @@ from linebot.exceptions import (
     InvalidSignatureError
 )
 from linebot.models import (
-    MessageEvent, TextMessage, LocationMessage, TextSendMessage,StickerSendMessage, 
-    TemplateSendMessage, ButtonsTemplate, MessageAction, LocationAction, 
-    CarouselTemplate, CarouselColumn, QuickReply, QuickReplyButton, CarouselTemplate, URIAction
+    MessageEvent, TextMessage, TextSendMessage,LocationMessage, LocationAction, 
+    CarouselTemplate, CarouselColumn, QuickReply, QuickReplyButton, CarouselTemplate,
+    URIAction,TemplateSendMessage
 )
 
-# 質問用クラス
-class Question:
-    def __init__(self, text, choices):
-        self.text = text
-        self.choices = choices
-
-# 質問群
-q1 = Question("具体的には？", 
-                      {"頭が痛い":"脳神経内科",
-                       "息苦しい":"呼吸器科",
-                       "歯が痛い":"歯科",
-                       "目がかゆい":"眼科"})
-q2 = Question("具体的には？", 
-                      {"おなかが痛い":"消化器科",
-                       "腰が痛い":"整形外科",
-                       "肩こりがひどい":"マッサージ",
-                       "動悸がする":"循環器科"})
-q3 = Question("具体的には？",
-                      {"手が痛い": "整形外科",
-                       "手荒れがひどい":"皮膚科",
-                       "足が痛い": "整形外科",
-                       "足がむくんでいる":"内科"})
-q4 = Question("具体的には？",
-                      {"熱っぽい":"内科",
-                       "だるい":"内科",
-                       "眠れない":"内科",
-                       "いらいらする":"心療内科"})
-q5 = Question("どこがつらい？",
-                      {"首から上":q1,
-                       "手とか足":q3,
-                       "それ以外":q2,
-                       "全部":q4})
-q6 = Question("無理してない？",
-                      {"してない":[8515,16581242],
-                       "してる":q5})
-qaSet = Question("元気？",
-                      {"元気！":q6,
-                       "いまいち":q5,
-                       "つらい":q5})
-# ステータス保存
-status = {}
+chat_keep = {}
 
 def main(request):
     channel_secret = os.environ.get('LINE_CHANNEL_SECRET')
     channel_access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
     place_api_key = os.environ.get('PLACE_API_KEY')
-    google_map_url = "https://www.google.com/maps/search/?api=1"
+    error_message = 'ごめん\nばあちゃん耳が遠いけぇね...'
 
-
+    # LINEBOTの設定
     line_bot_api = LineBotApi(channel_access_token)
     parser = WebhookParser(channel_secret)
 
@@ -82,20 +45,19 @@ def main(request):
         events = parser.parse(body, signature)
     except InvalidSignatureError:
         return abort(405)
-    
+
     for event in events:
         if isinstance(event, MessageEvent):
             # メッセージを受信した場合、返信データ編集用の変数を用意
             reply_data = []
-
-            # ユーザーIDを取得する
+            # ユーザーIDを取得
             userid = event.source.user_id
+
             if isinstance(event.message, LocationMessage):                
-                if userid in status:
+                if userid in chat_keep:
                     # 位置情報を取得した場合、GooglePlaceAPIで周辺検索
-                    search_word = status[userid]
-                    if search_word.endswith("科"):
-                        search_word = '病院　' + search_word
+                    search_word = chat_keep[userid].get('search_word') 
+                    # GooglePlaceAPIで周辺検索
                     map_client = googlemaps.Client(place_api_key)
                     loc = {'lat': event.message.latitude, 'lng': event.message.longitude}
                     place_result = map_client.places_nearby(keyword=search_word, location=loc, radius=1000, language='ja')
@@ -111,6 +73,9 @@ def main(request):
                             response = requests.get('https://maps.googleapis.com/maps/api/place/photo?photoreference=' + photo_reference + '&maxwidth=400&key=' + place_api_key)
                             image_url = response.url
                             shop_name = data['name']
+                            # shop_nameが40文字以上の場合、35文字でカット
+                            if len(shop_name) > 40:
+                                shop_name = shop_name[:35] + '...'
                             like_num = data['rating']
                             place_id = data['place_id']
                             user_ratings_total = data['user_ratings_total']
@@ -135,91 +100,105 @@ def main(request):
                             continue
                     # データがなかった場合
                     if len(columns) == 0:
-                        reply_data.append(TextSendMessage(text='近くに見当たらないみたいだ'))
+                        reply_data.append(TextSendMessage(text='ちょっと見つからないね...'))
                     else:
-                        reply_data.append(TextSendMessage(text='探したよ'))
+                        reply_data.append(TextSendMessage(text='このあたりかね？'))
                         reply_data.append(TemplateSendMessage(
                             alt_text='検索結果',
                             template=CarouselTemplate(
                                 columns=columns
                             )))
-                    # ステータスを削除する
-                    del status[userid]
                 else:
-                    # ユーザーIDが存在しない場合はやり直し
-                    reply_data.append(TextSendMessage(text='ごめん\n何話してたっけ？'))
+                    # ユーザーIDが存在しない場合はエラー
+                    reply_data.append(TextSendMessage(text=error_message))
                 line_bot_api.reply_message(
                     event.reply_token,
                     reply_data
                 )
             elif isinstance(event.message, TextMessage):
-                if userid in status:
-                    # ユーザーIDが存在する場合、回答メッセージが質問セットの回答選択肢にあるか確認
-                    if event.message.text in status[userid].choices:
-                        # 存在する場合は次の質問があるか確認
-                        next_action = status[userid].choices[event.message.text]
-                        if isinstance(next_action, Question):
-                            # 次の質問がある場合は質問セットを更新
-                            status[userid] = next_action
-                            # セットし直した質問セットをもとにボタンテンプレートを作成
-                            reply_data.append(make_button_template(next_action))
-                        elif isinstance(next_action, list):
-                            # リストの場合はスタンプメッセージを編集
-                            reply_data.append(
-                                StickerSendMessage(
-                                    package_id=next_action[0], sticker_id=next_action[1]
-                                ))
-                            # ステータスを削除する
-                            del status[userid]
-                        else:
-                            # どちらでもない場合（文字列の場合）、テキストの末尾を判定
-                            if next_action.endswith('科'):
-                                messageText = '病院行け'
-                            else:
-                                messageText = next_action + '行け'
-                            # ボタンに位置情報を返すアクションを設定する
-                            location = [QuickReplyButton(action=LocationAction(label="位置情報を送る"))]
-                            reply_data.append(
-                                TextSendMessage(text=messageText, quick_reply=QuickReply(items=location)))
-                            # ステータスを更新する
-                            status[userid] = next_action
-                    else:
-                        # メッセージが選択肢に存在しない場合、もう一度聞き直す
-                        reply_data.append(TextSendMessage(text='はぐらかさない'))
-                        reply_data.append(make_button_template(status[userid]))
-                else:
-                    # ユーザーIDが存在しない場合、質問セットを設定
-                    status[userid] = qaSet
-                    # 質問セットをもとにボタンテンプレートを作成
-                    reply_data.append(make_button_template(qaSet))
-
-                # メッセージを返す
-                line_bot_api.reply_message(
-                    event.reply_token,
-                    reply_data
+                # テキストメッセージを受信した場合、ユーザー情報を取得
+                profile = line_bot_api.get_profile(
+                    event.source.user_id
                 )
+                # プロフィールからユーザー名を取得する
+                user_name = profile.display_name
+                # 受信日時を取得する
+                timestamp = datetime.datetime.now()
+                # テキストメッセージを受信した場合
+                if event.source.user_id not in chat_keep:
+                    # モデルがない場合、新規チャットの作成
+                    chat = create_chat(user_name)
+                    chat_keep[event.source.user_id] = {'chat': chat, 'timestamp': timestamp}
+                else:
+                    # モデルが残っている場合
+                    if (timestamp - chat_keep[event.source.user_id].get('timestamp')).seconds / 60 > 30:
+                        # 前回メッセージから30分以上経過している場合は新規チャットに上書き
+                        chat = create_chat(user_name)
+                        chat_keep[event.source.user_id] = {'chat': chat, 'timestamp': timestamp}
+                    else:
+                        # 30分以内の場合は継続使用（タイムスタンプのみ上書き）
+                        chat = chat_keep[event.source.user_id].get('chat')
+                        chat_keep[event.source.user_id].update({'timestamp': timestamp})
+
+                try:
+                    # チャットの応答を生成
+                    response = chat.send_message(event.message.text)
+                    if '「' in response.text and '」' in response.text:
+                        # 応答に「」が含まれている場合、該当箇所を切り出してchat_keepに保存
+                        search_word = response.text.split('「')[1].split('」')[0]
+                        chat_keep[event.source.user_id].update({'search_word': search_word})
+                        # ボタンに位置情報を返すアクションを設定する
+                        location = [QuickReplyButton(action=LocationAction(label="近くを探してもらう"))]
+                        # 応答メッセージにクイックリプライをつける
+                        reply_data.append(
+                            TextSendMessage(text=response.text, quick_reply=QuickReply(items=location)))
+                    else:
+                        # 応答に「」が含まれていない場合、テキストのみを返す
+                        reply_data.append(TextSendMessage(text=response.text))
+                except:
+                    # エラーが発生した場合、エラーメッセージを返す
+                    reply_data.append(TextSendMessage(text=error_message))
+                # 応答内容をLINEで送信
+                line_bot_api.reply_message(
+                        event.reply_token,
+                        reply_data
+                    ) 
             else:
                 continue
 
     return jsonify({ 'message': 'ok'})
 
-def make_button_template(questions):
-    # ボタンをリスト化する
-    button_list = []
-    # question内の回答選択肢dictからキーを全件取得
-    for key in questions.choices:
-        button_list.append(
-            MessageAction(
-                label=key,
-                text=key
-            )
-        )
-    # questionのtextを質問メッセージとして設定
-    message_template = TemplateSendMessage(
-        alt_text=questions.text,
-        template=ButtonsTemplate(
-            text = questions.text,            
-            actions=button_list
-        )
-    )
-    return message_template
+
+def create_chat(user_name):
+    # モデルがない場合、Gemini APIの設定
+    gemini_api_key = os.getenv('GEMINI_API_KEY')
+    genai.configure(api_key=gemini_api_key)
+    model = genai.GenerativeModel('gemini-pro')
+    default_initial_prompt = f"""
+    以下の内容を理解して従ってください。この内容は、会話履歴が残っている限り有効です。理解したら”わかりました”と応答してください。
+    あなたは、孫と離れて暮らす祖母で、孫であるユーザー「{user_name}」の体調を気にしています。ユーザーからのメッセージに対し、以下の条件を守って応答します。
+    条件：
+    1.応答は最大500文字程度のテキストで出力してください。
+    2.応答する際は、以下の規則に従ってください。
+    - 一人称：「ばあちゃん」
+    - 二人称：「{user_name}」「あんた」
+    - 使用文字：ひらがな・カタカナ・漢字・数字・改行
+    - あいさつ（句読点またはスペース・改行要）：「おはようさん」「こんにちは」「こんばんは」
+    - 順接「（だ）から」：「（や）けぇ」
+    - 逆説「（だ）けど」：「（や）けんど」
+    - 命令「（し）なさい」：「（し）んさい」
+    - 依頼「（し）てください」：「（し）んさい」
+    - 禁止「してはいけません」「しないように」：「したらいけん」「しんさるな」
+    - 否定「しない」「やらない」：「せん」「やらん」
+    - 疑問・確認「（です）か？」：「（かい）ね？」
+    - 強調「（です）ね」：「（じゃ）ね」
+    - 指示語「こんな」「そんな」「あんな」「どんな」：「こがぁ」「そがぁ」「あがぁ」「どがぁ」
+    3.体調について質問して、相手の体調が悪そうな場合は追加の質問で症状を絞り込んでください。
+    4.症状が絞り込めたら「○○科の病院」「マッサージ」「鍼灸院」等の施設を勧めてください。
+    5.勧める施設は１回の応答につきに１つだけ、鍵括弧で囲んで出力してください。
+    """
+    chat = model.start_chat(history=[
+        glm.Content(role='user', parts=[glm.Part(text=default_initial_prompt)]),
+        glm.Content(role='model', parts=[glm.Part(text='わかりました')])
+        ])
+    return chat
